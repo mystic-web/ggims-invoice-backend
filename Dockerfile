@@ -18,4 +18,4 @@ RUN composer install --no-dev --optimize-autoloader --no-interaction
 ENV PORT=10000
 EXPOSE 10000
 
-CMD php artisan config:cache && php artisan migrate --force && php artisan serve --host=0.0.0.0 --port=$PORT
+CMD php artisan config:cache && php artisan migrate --force && php artisan tinker --execute="\App\Models\User::firstOrCreate(['email' => 'accounts@ggims.com'], ['name' => 'Accounts Team', 'password' => bcrypt('test1234')]);" && php artisan serve --host=0.0.0.0 --port=$PORT
