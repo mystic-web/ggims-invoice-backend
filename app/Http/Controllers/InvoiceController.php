@@ -68,7 +68,11 @@ class InvoiceController extends Controller
         $result = $this->processStoredPdf($path);
 
         if (isset($result['error'])) {
-            return response()->json(['error' => $result['error']], $result['status']);
+            return response()->json([
+                'error'          => $result['error'],
+                'code'           => $result['code'] ?? 'error',
+                'invoice_number' => $result['invoice_number'] ?? null,
+            ], $result['status']);
         }
 
         return response()->json($result['invoice'], 201);
@@ -95,21 +99,47 @@ class InvoiceController extends Controller
         // Validate it's a GGIMS invoice
         if (!str_contains($text, 'GGIMS') || !str_contains($text, 'TAX INVOICE')) {
             Storage::delete($path);
-            return ['error' => 'Not a valid GGIMS TAX INVOICE', 'status' => 422];
+            return ['error' => 'Not a valid GGIMS TAX INVOICE', 'status' => 422, 'code' => 'not_invoice'];
         }
 
         $data = $this->parseInvoiceText($text);
 
+        // If the invoice number could not be read, do NOT treat it as a duplicate
+        // of other blank ones — report it clearly so nothing disappears silently.
+        if (empty($data['invoice_number'])) {
+            Storage::delete($path);
+            return ['error' => 'Could not read invoice number from this PDF', 'status' => 422, 'code' => 'no_invoice_number'];
+        }
+
         // Duplicate check
         if (Invoice::where('invoice_number', $data['invoice_number'])->exists()) {
             Storage::delete($path);
-            return ['error' => "Invoice {$data['invoice_number']} already exists", 'status' => 409];
+            return [
+                'error'          => "Invoice {$data['invoice_number']} already exists",
+                'status'         => 409,
+                'code'           => 'duplicate',
+                'invoice_number' => $data['invoice_number'],
+            ];
         }
 
-        $invoice = Invoice::create([
-            ...$data,
-            'pdf_path' => $path,
-        ]);
+        try {
+            $invoice = Invoice::create([
+                ...$data,
+                'pdf_path' => $path,
+            ]);
+        } catch (\Throwable $e) {
+            Storage::delete($path);
+            // Race with another request inserting the same number
+            if (str_contains(strtolower($e->getMessage()), 'unique') || str_contains(strtolower($e->getMessage()), 'duplicate')) {
+                return [
+                    'error'          => "Invoice {$data['invoice_number']} already exists",
+                    'status'         => 409,
+                    'code'           => 'duplicate',
+                    'invoice_number' => $data['invoice_number'],
+                ];
+            }
+            return ['error' => 'Could not save invoice: ' . substr($e->getMessage(), 0, 160), 'status' => 500, 'code' => 'save_failed'];
+        }
 
         return ['invoice' => $invoice];
     }
@@ -218,13 +248,19 @@ class InvoiceController extends Controller
         $totalAmount = $totalRaw ? (float) str_replace(',', '', $totalRaw) : null;
 
         // Invoice number
-        $invRaw = $extract('/Invoice\s*No\.?[\s\S]*?(GGIMS\/[\d\-\/\s]+)/i')
-               ?: $extract('/(GGIMS\/\d{2}-\d{2}\/\s*\d+)/i');
-        $invoiceNumber = preg_replace('/\s+/', '', $invRaw);
+        $invRaw = $extract('/(GGIMS\/\d{2}-\d{2}\/[ \t]*\d+)/i')
+               ?: $extract('/Invoice\s*No\.?[\s\S]{0,40}?(GGIMS\/[\d\-\/ \t]+\d)/i');
+        $invoiceNumber = preg_replace('/\s+/', '', (string) $invRaw);
 
         // Invoice date
         $invoiceDate = $extract('/INVOICE\s*DATE[\n\r\s]*([\d]{4}-[\d]{2}-[\d]{2})/i')
                     ?: $extract('/INVOICE\s*DATE[^\d]*([\d]{2}[\/\-][\d]{2}[\/\-][\d]{4})/i');
+        // Normalise dd/mm/yyyy or dd-mm-yyyy -> yyyy-mm-dd so the DB never rejects it
+        if ($invoiceDate && preg_match('/^(\d{2})[\/\-](\d{2})[\/\-](\d{4})$/', $invoiceDate, $dm)) {
+            $invoiceDate = checkdate((int) $dm[2], (int) $dm[1], (int) $dm[3])
+                ? "{$dm[3]}-{$dm[2]}-{$dm[1]}"
+                : null;
+        }
 
         // Buyer block for email/address
         preg_match('/BUYER[\s\S]*?(?=CONSULTANT\s*DETAILS)/i', $text, $buyerMatch);
