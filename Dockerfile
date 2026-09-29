@@ -18,6 +18,4 @@ RUN composer install --no-dev --optimize-autoloader --no-interaction
 ENV PORT=10000
 EXPOSE 10000
 
-# TEMPORARY: wipes all invoice + processed-email data on startup.
-# Remove the truncate line after this deploy runs once!
-CMD php artisan config:cache && php artisan migrate --force && php artisan tinker --execute="\DB::table('invoices')->truncate(); \DB::table('processed_emails')->truncate(); \App\Models\User::firstOrCreate(['email' => 'accounts@ggims.com'], ['name' => 'Accounts Team', 'password' => bcrypt('test1234')]);" && php artisan serve --host=0.0.0.0 --port=$PORT
+CMD php artisan config:cache && php artisan migrate --force && php artisan tinker --execute="\App\Models\User::firstOrCreate(['email' => 'accounts@ggims.com'], ['name' => 'Accounts Team', 'password' => bcrypt('test1234')]);" && php artisan serve --host=0.0.0.0 --port=$PORT
